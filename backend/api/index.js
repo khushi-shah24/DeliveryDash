@@ -4,7 +4,7 @@ const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const cors = require('cors');
-require('dotenv').config();
+require('dotenv').config(); // Loads .env file for local development
 
 const app = express();
 app.use(express.json());
@@ -14,42 +14,63 @@ app.use(cors());
 // Set strictQuery to true to suppress the deprecation warning
 mongoose.set('strictQuery', true);
 
-// Cache the database connection
-let cachedDb = null;
+// Increase the Mongoose operation timeout. This is a buffer,
+// not a solution for underlying connection issues, but can help
+// prevent premature timeouts if the database is slow to respond.
+mongoose.set('bufferTimeoutMS', 30000); // Set to 30 seconds
+
+// Cache the database connection promise to avoid multiple connection attempts
+// during a single cold start or warm instance lifecycle.
+let cachedDbConnection = null;
 
 /**
  * Connects to MongoDB, reusing an existing connection if available.
  * This pattern is crucial for serverless environments to avoid
- * creating new connections on every function invocation.
+ * creating new connections on every function invocation and to handle
+ * connection drops gracefully.
  */
 async function connectToDatabase() {
-    // If a connection is already established, return it
-    if (cachedDb && mongoose.connection.readyState === 1) { // readyState 1 means connected
-        console.log('Using existing MongoDB connection');
-        return cachedDb;
+    // If a connection promise already exists and is resolving, return it
+    if (cachedDbConnection) {
+        console.log('Using existing MongoDB connection promise.');
+        return cachedDbConnection;
     }
 
-    // If no connection or connection is not ready, establish a new one
-    console.log('Establishing new MongoDB connection');
-    try {
-        const client = await mongoose.connect(process.env.MONGODB_URI, {
-            useNewUrlParser: true,
-            useUnifiedTopology: true,
-            // Add server selection timeout to prevent indefinite waiting
-            serverSelectionTimeoutMS: 5000, // Keep trying for 5 seconds
-            // Keep alive for long-running operations (optional, but good for serverless)
-            // This helps prevent connections from being closed by the database due to inactivity
-            // while the function instance is still warm.
-            keepAlive: true,
-            keepAliveInitialDelay: 300000 // 5 minutes
-        });
-        cachedDb = client.connection.db;
-        console.log('MongoDB connected successfully');
-        return cachedDb;
-    } catch (err) {
-        console.error('MongoDB connection error:', err);
-        throw new Error('Failed to connect to MongoDB'); // Re-throw to propagate the error
+    // Check if there's an existing connection and if it's healthy.
+    // readyState 1 means connected, 2 means connecting, 3 means disconnecting, 0 means disconnected.
+    // We only want to reuse if it's actively connected.
+    if (mongoose.connections && mongoose.connections[0] && mongoose.connections[0].readyState === 1) {
+        console.log('Reusing active MongoDB connection.');
+        cachedDbConnection = Promise.resolve(mongoose.connections[0].db); // Wrap in a promise for consistency
+        return cachedDbConnection;
     }
+
+    console.log('Establishing new MongoDB connection...');
+    // Create a new connection promise
+    cachedDbConnection = mongoose.connect(process.env.MONGODB_URI, {
+        useNewUrlParser: true,
+        useUnifiedTopology: true,
+        serverSelectionTimeoutMS: 10000, // Try to connect for 10 seconds
+        socketTimeoutMS: 45000, // Close sockets after 45 seconds of inactivity
+        connectTimeoutMS: 10000, // Give up initial connection after 10 seconds
+        // keepAlive is deprecated in newer Mongoose versions, but if using older,
+        // it helps prevent connections from being closed by the database due to inactivity
+        // while the function instance is still warm.
+        // If your Mongoose version is 6.x or higher, this might not be needed or could be removed.
+        // keepAlive: true,
+        // keepAliveInitialDelay: 300000 // 5 minutes
+    })
+    .then(client => {
+        console.log('MongoDB connected successfully!');
+        return client.connection.db;
+    })
+    .catch(err => {
+        console.error('MongoDB connection error:', err.message);
+        cachedDbConnection = null; // Clear the cached promise on failure
+        throw new Error('Failed to connect to MongoDB: ' + err.message);
+    });
+
+    return cachedDbConnection;
 }
 
 // --- Models ---
@@ -90,10 +111,10 @@ const authMiddleware = (req, res, next) => {
 // @route   POST /api/auth/register
 // @desc    Register a new user
 app.post('/api/auth/register', async (req, res) => {
-    // Ensure database connection before handling the request
     try {
-        await connectToDatabase();
+        await connectToDatabase(); // Ensure DB connection
     } catch (error) {
+        console.error('API /register - DB connection failed:', error);
         return res.status(500).send('Database connection error');
     }
 
@@ -109,11 +130,14 @@ app.post('/api/auth/register', async (req, res) => {
         await user.save();
         const payload = { user: { id: user.id } };
         jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '5h' }, (err, token) => {
-            if (err) throw err;
+            if (err) {
+                console.error('JWT signing error:', err);
+                return res.status(500).send('Server Error during token generation');
+            }
             res.json({ token, email: user.email });
         });
     } catch (e) {
-        console.error(e.message);
+        console.error('API /register - Server Error:', e.message);
         res.status(500).send('Server Error');
     }
 });
@@ -121,10 +145,10 @@ app.post('/api/auth/register', async (req, res) => {
 // @route   POST /api/auth/login
 // @desc    Authenticate user & get token
 app.post('/api/auth/login', async (req, res) => {
-    // Ensure database connection before handling the request
     try {
-        await connectToDatabase();
+        await connectToDatabase(); // Ensure DB connection
     } catch (error) {
+        console.error('API /login - DB connection failed:', error);
         return res.status(500).send('Database connection error');
     }
 
@@ -140,11 +164,14 @@ app.post('/api/auth/login', async (req, res) => {
         }
         const payload = { user: { id: user.id } };
         jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '5h' }, (err, token) => {
-            if (err) throw err;
+            if (err) {
+                console.error('JWT signing error:', err);
+                return res.status(500).send('Server Error during token generation');
+            }
             res.json({ token, email: user.email });
         });
     } catch (e) {
-        console.error(e.message);
+        console.error('API /login - Server Error:', e.message);
         res.status(500).send('Server Error');
     }
 });
@@ -152,7 +179,7 @@ app.post('/api/auth/login', async (req, res) => {
 // @route   POST /api/deliveries/quote
 // @desc    Get live quotes from "courier partners"
 // @access  Private
-app.post('/api/deliveries/quote', authMiddleware, async (req, res) => {
+app.post('/api/deliveries/quote', authMiddleware, (req, res) => {
     // No database interaction needed for mock quotes, so no connectToDatabase call here.
     const mockQuotes = [
         { courier: 'FlashExpress', price: 15, eta: '2 hours', id: 'FLSH' + Math.floor(Math.random() * 10000) },
@@ -166,10 +193,10 @@ app.post('/api/deliveries/quote', authMiddleware, async (req, res) => {
 // @desc    Book a new delivery
 // @access  Private
 app.post('/api/deliveries/book', authMiddleware, async (req, res) => {
-    // Ensure database connection before handling the request
     try {
-        await connectToDatabase();
+        await connectToDatabase(); // Ensure DB connection
     } catch (error) {
+        console.error('API /book - DB connection failed:', error);
         return res.status(500).send('Database connection error');
     }
 
@@ -186,7 +213,7 @@ app.post('/api/deliveries/book', authMiddleware, async (req, res) => {
         await newOrder.save();
         res.status(201).json(newOrder);
     } catch (e) {
-        console.error(e.message);
+        console.error('API /book - Server Error:', e.message);
         res.status(500).send('Server Error');
     }
 });
@@ -195,10 +222,10 @@ app.post('/api/deliveries/book', authMiddleware, async (req, res) => {
 // @desc    Get live status of a delivery
 // @access  Private
 app.get('/api/deliveries/status/:id', authMiddleware, async (req, res) => {
-    // Ensure database connection before handling the request
     try {
-        await connectToDatabase();
+        await connectToDatabase(); // Ensure DB connection
     } catch (error) {
+        console.error('API /status - DB connection failed:', error);
         return res.status(500).send('Database connection error');
     }
 
@@ -215,10 +242,74 @@ app.get('/api/deliveries/status/:id', authMiddleware, async (req, res) => {
         // await order.save();
         res.json({ orderId: order._id, status: order.status, lastUpdated: new Date() });
     } catch (e) {
-        console.error(e.message);
+        console.error('API /status - Server Error:', e.message);
         res.status(500).send('Server Error');
     }
 });
+
+// @route   POST /api/deliveries/estimate-price
+// @desc    Get estimated freight price from Delhivery API
+// @access  Private
+app.post('/api/deliveries/estimate-price', authMiddleware, async (req, res) => {
+    // Delhivery API URL
+    const delhiveryApiUrl = 'https://ltl-clients-api-dev.delhivery.com/freight/estimate';
+
+    // Extract necessary data from the request body
+    const {
+        dimensions, // Array of objects: [{length_cm, width_cm, height_cm, box_count}]
+        weight_g,
+        cheque_payment,
+        source_pin,
+        consignee_pin,
+        payment_mode,
+        inv_amount,
+        freight_mode,
+        rov_insurance
+    } = req.body;
+
+    // Validate essential inputs
+    if (!dimensions || !weight_g || !source_pin || !consignee_pin) {
+        return res.status(400).json({ msg: 'Missing required fields for price estimation.' });
+    }
+
+    try {
+        const delhiveryRequestBody = {
+            dimensions,
+            weight_g,
+            cheque_payment: cheque_payment || false,
+            source_pin,
+            consignee_pin,
+            payment_mode: payment_mode || 'prepaid',
+            inv_amount: inv_amount || 0,
+            freight_mode: freight_mode || 'fod',
+            rov_insurance: rov_insurance || false
+        };
+
+        // Make the call to the Delhivery API
+        const response = await fetch(delhiveryApiUrl, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${process.env.DELHIVERY_API_TOKEN}`, // Use environment variable for token
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(delhiveryRequestBody)
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error(`Delhivery API error: ${response.status} - ${errorText}`);
+            return res.status(response.status).json({ msg: 'Failed to get price estimate from Delhivery', details: errorText });
+        }
+
+        const data = await response.json();
+        res.json(data); // Send the Delhivery response directly to the client
+
+    } catch (error) {
+        console.error('Error calling Delhivery API:', error.message);
+        res.status(500).send('Server Error: Could not get price estimate.');
+    }
+});
+
 
 // Export the app for Vercel to use as a serverless function
 module.exports = app;
