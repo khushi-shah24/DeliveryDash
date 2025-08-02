@@ -156,5 +156,7 @@ app.get('/api/deliveries/status/:id', authMiddleware, async (req, res) => {
     }
 });
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server started on port ${PORT}`));
+// const PORT = process.env.PORT || 5000;
+// app.listen(PORT, () => console.log(`Server started on port ${PORT}`));
+
+module.exports = app; // Export the app for testing
