@@ -254,7 +254,7 @@ app.post('/api/deliveries/estimate-price', authMiddleware, async (req, res) => {
     // Delhivery API URL for bulk rate calculator
     const delhiveryApiUrl = 'https://ucp-app-gateway.delhivery.com/web/api/wallet/bulk_rate_calculator';
 
-    // The request body for this API expects an array of 'requests'
+    // The request body for this API expects an array of 'requestss'
     const { requests } = req.body;
 
     // Validate essential inputs: 'requests' array must exist and not be empty
