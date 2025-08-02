@@ -303,7 +303,7 @@ app.post('/api/deliveries/estimate-price', authMiddleware, async (req, res) => {
         }
 
         const data = await response.json();
-        res.json(data); // Send the Delhivery response directly to the client
+        res.json(data); // Send the Delhivery response directly to the cliet
 
     } catch (error) {
         console.error('Error calling Delhivery API:', error.message);
