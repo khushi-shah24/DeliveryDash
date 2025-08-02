@@ -251,38 +251,39 @@ app.get('/api/deliveries/status/:id', authMiddleware, async (req, res) => {
 // @desc    Get estimated freight price from Delhivery API
 // @access  Private
 app.post('/api/deliveries/estimate-price', authMiddleware, async (req, res) => {
-    // Delhivery API URL
-    const delhiveryApiUrl = 'https://ltl-clients-api-dev.delhivery.com/freight/estimate';
+    // Delhivery API URL for bulk rate calculator
+    const delhiveryApiUrl = 'https://ucp-app-gateway.delhivery.com/web/api/wallet/bulk_rate_calculator';
 
-    // Extract necessary data from the request body
-    const {
-        dimensions, // Array of objects: [{length_cm, width_cm, height_cm, box_count}]
-        weight_g,
-        cheque_payment,
-        source_pin,
-        consignee_pin,
-        payment_mode,
-        inv_amount,
-        freight_mode,
-        rov_insurance
-    } = req.body;
+    // The request body for this API expects an array of 'requests'
+    const { requests } = req.body;
 
-    // Validate essential inputs
-    if (!dimensions || !weight_g || !source_pin || !consignee_pin) {
-        return res.status(400).json({ msg: 'Missing required fields for price estimation.' });
+    // Validate essential inputs: 'requests' array must exist and not be empty
+    if (!requests || !Array.isArray(requests) || requests.length === 0) {
+        return res.status(400).json({ msg: 'Missing or invalid "requests" array in body for price estimation.' });
     }
 
+    // You might want to add more granular validation for each item in the 'requests' array
+    // For example, checking for 'origin_pin', 'destination_pin', 'weight', etc.
+    // For now, we'll assume the incoming 'requests' array contains valid objects.
+
     try {
+        // The Delhivery API expects the payload directly under the 'requests' key
         const delhiveryRequestBody = {
-            dimensions,
-            weight_g,
-            cheque_payment: cheque_payment || false,
-            source_pin,
-            consignee_pin,
-            payment_mode: payment_mode || 'prepaid',
-            inv_amount: inv_amount || 0,
-            freight_mode: freight_mode || 'fod',
-            rov_insurance: rov_insurance || false
+            requests: requests.map(item => ({
+                packaging_type: item.packaging_type || 'FLYER',
+                shipment_type: item.shipment_type || 'FORWARD',
+                origin_pin: item.origin_pin,
+                destination_pin: item.destination_pin,
+                weight: item.weight,
+                weight_unit: item.weight_unit || 'GM',
+                payment_mode: item.payment_mode || 'PREPAID',
+                cod_amount: item.cod_amount || 0,
+                length: item.length || 1,
+                breadth: item.breadth || 1,
+                height: item.height || 1,
+                shipping_mode: item.shipping_mode || 'SURFACE',
+                id: item.id || Math.random().toString(36).substring(2, 15) // Generate a unique ID if not provided
+            }))
         };
 
         // Make the call to the Delhivery API
@@ -309,6 +310,7 @@ app.post('/api/deliveries/estimate-price', authMiddleware, async (req, res) => {
         res.status(500).send('Server Error: Could not get price estimate.');
     }
 });
+
 
 
 // Export the app for Vercel to use as a serverless function
